@@ -1,0 +1,1685 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MiniLLM — les trois phases, vues de l'intérieur</title>
+<style>
+  /* ---------------------------------------------------------------
+     Palette : slots catégoriels fixes, un par mot, jamais recyclés.
+     Les valeurs sombres sont des pas choisis pour la surface sombre,
+     pas une inversion automatique. Déclarées sous les deux portées :
+     la media query couvre le réglage système, la portée [data-theme]
+     couvre la bascule manuelle et doit gagner dans les deux sens.
+     --------------------------------------------------------------- */
+  .viz-root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --page-plane: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --gridline: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.10);
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #eda100;
+    --series-5: #e87ba4;
+    --series-6: #008300;
+    --series-7: #4a3aa7;
+    /* Échelle divergente : deux pôles chaud/froid, milieu gris neutre. */
+    --div-pos: #2a78d6;
+    --div-neg: #e34948;
+    --div-mid: #f0efec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --page-plane: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --gridline: #2c2c2a;
+      --axis: #383835;
+      --border: rgba(255, 255, 255, 0.10);
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --series-4: #c98500;
+      --series-5: #d55181;
+      --series-6: #008300;
+      --series-7: #9085e9;
+      --div-pos: #3987e5;
+      --div-neg: #e66767;
+      --div-mid: #383835;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page-plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --gridline: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --div-pos: #3987e5;
+    --div-neg: #e66767;
+    --div-mid: #383835;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; }
+  .viz-root {
+    background: var(--page-plane);
+    color: var(--text-primary);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    min-height: 100vh;
+    padding: 24px 16px calc(32px + env(safe-area-inset-bottom, 0px));
+  }
+  .wrap { margin: 0 auto; max-width: 1080px; }
+
+  header h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 4px; }
+  header p { color: var(--text-secondary); margin: 0; max-width: 78ch; }
+  .note { color: var(--text-muted); font-size: 12.5px; margin-top: 6px !important; }
+
+  /* Onglets de phase */
+  .onglets { border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 2px; margin: 18px 0 0; }
+  .onglets button {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    color: var(--text-secondary);
+    font-size: 13.5px;
+    padding: 9px 13px;
+  }
+  .onglets button[aria-selected="true"] {
+    border-bottom-color: var(--series-1);
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  /* Une seule rangée de contrôles par phase, au-dessus de ce qu'elle pilote. */
+  .controls {
+    align-items: center;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+    margin: 16px 0;
+    padding: 12px 14px;
+  }
+  .controls label { color: var(--text-secondary); font-size: 12.5px; }
+  button, select {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 11px;
+  }
+  button:hover, select:hover { background: color-mix(in oklab, var(--text-primary) 5%, var(--surface-1)); }
+  button[aria-pressed="true"] { border-color: color-mix(in oklab, var(--text-primary) 35%, var(--border)); font-weight: 600; }
+  .grow { align-items: center; display: flex; flex: 1 1 220px; gap: 10px; min-width: 200px; }
+  input[type="range"] { accent-color: var(--series-1); flex: 1; min-width: 110px; }
+  .curseur-val { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 3.2em; text-align: right; }
+
+  .tiles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 16px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .tile dt { color: var(--text-secondary); font-size: 12px; margin: 0 0 4px; }
+  .tile dd { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; margin: 0; }
+  .tile dd small { color: var(--text-muted); font-size: 12px; font-weight: 400; letter-spacing: 0; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; padding: 16px; }
+  .card h2 { font-size: 14px; font-weight: 600; margin: 0 0 2px; }
+  .card h2 + p { color: var(--text-secondary); font-size: 12.5px; margin: 0 0 12px; }
+  .card h2 + p + p { margin-top: -8px; }
+
+  /* Repère isométrique : la carte reste carrée, on plafonne donc sa taille
+     au lieu de lui laisser toute la largeur, qui étirerait la page. */
+  .plot-wrap { margin: 0 auto; max-width: 600px; position: relative; }
+  .plot-large { margin: 0; max-width: none; position: relative; }
+  svg { display: block; height: auto; width: 100%; }
+  .grid-line { stroke: var(--gridline); stroke-width: 1; }
+  .axis-line { stroke: var(--axis); stroke-width: 1; }
+  .tick { fill: var(--text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .axis-name { fill: var(--text-secondary); font-size: 11px; }
+  .etiquette { fill: var(--text-primary); font-size: 12px; font-weight: 600; paint-order: stroke; stroke: var(--surface-1); stroke-width: 3px; }
+  .etiquette-pale { fill: var(--text-muted); font-size: 11px; paint-order: stroke; stroke: var(--surface-1); stroke-width: 3px; }
+  .leader { stroke: var(--axis); stroke-width: 1; }
+  .piste { fill: none; stroke-linecap: round; stroke-width: 2; }
+  .marque { stroke: var(--surface-1); stroke-width: 2; }
+  .trace { stroke: none; }
+  /* Embedding figé pendant la phase 2 : contour seul, pour qu'on voie
+     immédiatement qu'il ne bouge pas. */
+  .fige { fill: none; stroke-dasharray: none; stroke-width: 1.5; }
+
+  /* Couleur portée par une classe : la bascule de thème repeint sans JS. */
+  .s1 { color: var(--series-1); }
+  .s2 { color: var(--series-2); }
+  .s3 { color: var(--series-3); }
+  .s4 { color: var(--series-4); }
+  .s5 { color: var(--series-5); }
+  .s6 { color: var(--series-6); }
+  .s7 { color: var(--series-7); }
+  .marque, .trace { fill: currentColor; }
+  .piste { fill: none; stroke: currentColor; }
+  .fige { stroke: currentColor; }
+  .barre { fill: currentColor; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 12px; }
+  .legend button { align-items: center; background: none; border: none; border-radius: 6px; display: flex; gap: 7px; padding: 3px 6px; }
+  .legend button[aria-pressed="false"] { opacity: 0.4; }
+  .legend .mot { color: var(--text-primary); font-weight: 500; }
+  .legend svg { height: 14px; width: 14px; }
+  .legend-note { align-items: center; color: var(--text-secondary); display: flex; font-size: 12px; gap: 7px; }
+  .legend-note svg { height: 14px; width: 14px; }
+
+  .facettes { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .facette { border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+  .facette h3 { align-items: center; display: flex; font-size: 12.5px; font-weight: 600; gap: 6px; margin: 0 0 6px; }
+  .facette h3 svg { height: 12px; width: 12px; }
+  .facette .chiffre { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 400; margin-left: auto; }
+
+  .duo { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
+
+  .tooltip {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+    font-size: 12px;
+    left: 0;
+    padding: 8px 10px;
+    pointer-events: none;
+    position: absolute;
+    top: 0;
+    transform: translate(-50%, calc(-100% - 14px));
+    white-space: nowrap;
+    z-index: 2;
+  }
+  .tooltip[hidden] { display: none; }
+  .tooltip .val { font-size: 14px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .tooltip .lab { color: var(--text-secondary); }
+  .tooltip dl { display: grid; gap: 1px 10px; grid-template-columns: auto auto; margin: 6px 0 0; }
+  .tooltip dt { color: var(--text-secondary); }
+  .tooltip dd { font-variant-numeric: tabular-nums; margin: 0; text-align: right; }
+  .tooltip .cle { display: inline-block; height: 2px; margin-right: 6px; vertical-align: middle; width: 12px; }
+
+  table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+  .table-scroll { overflow-x: auto; }
+  th, td { border-bottom: 1px solid var(--gridline); padding: 6px 10px; text-align: right; white-space: nowrap; }
+  th { color: var(--text-secondary); font-weight: 500; }
+  th:first-child, td:first-child { text-align: left; }
+  td { font-variant-numeric: tabular-nums; }
+  .cle-table { border-radius: 2px; display: inline-block; height: 9px; margin-right: 7px; vertical-align: baseline; width: 9px; }
+  tr[data-choisi="true"] th, tr[data-choisi="true"] td { font-weight: 600; }
+
+  /* Schéma du réseau */
+  figure { margin: 0; }
+  figcaption { color: var(--text-secondary); font-size: 12.5px; margin-top: 10px; }
+  .etage { fill: var(--text-secondary); font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
+  .fleche-nom { fill: var(--text-secondary); font-size: 10.5px; }
+  .fleche { fill: none; stroke: var(--text-muted); stroke-width: 1.2; }
+  .jeton { fill: var(--surface-1); stroke: currentColor; stroke-width: 2; }
+  .jeton-texte { fill: var(--text-primary); font-size: 13px; font-weight: 600; }
+  .cellule-nom { fill: var(--text-secondary); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  .valeur { fill: var(--text-primary); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  .valeur-pale { fill: var(--text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .cadre-choisi { fill: none; stroke: var(--text-primary); stroke-dasharray: 3 2; stroke-width: 1.5; }
+  .sequence { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .sequence button { font-size: 15px; font-weight: 600; padding: 7px 13px; }
+  .sequence .fleche-seq { align-self: center; color: var(--text-muted); }
+  .echelle-div { align-items: center; color: var(--text-secondary); display: flex; font-size: 11.5px; gap: 8px; margin-top: 10px; }
+  .echelle-div .bande { border: 1px solid var(--border); border-radius: 3px; height: 11px; width: 130px; }
+
+  [hidden] { display: none !important; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<main class="viz-root">
+<div class="wrap">
+
+  <header>
+    <h1>MiniLLM, les trois phases vues de l'intérieur</h1>
+    <p id="sous-titre"></p>
+    <p class="note" id="avertissement"></p>
+  </header>
+
+  <nav class="onglets" role="tablist" aria-label="Phases">
+    <button type="button" role="tab" id="onglet-1" aria-controls="phase-1" aria-selected="true">1 · Pré-entraînement</button>
+    <button type="button" role="tab" id="onglet-2" aria-controls="phase-2" aria-selected="false">2 · Renforcement</button>
+    <button type="button" role="tab" id="onglet-3" aria-controls="phase-3" aria-selected="false">3 · Inférence</button>
+  </nav>
+
+  <!-- ============================ PHASE 1 ============================ -->
+  <section id="phase-1" role="tabpanel" aria-labelledby="onglet-1">
+
+    <div class="controls" role="group" aria-label="Contrôles du pré-entraînement">
+      <button id="p1-lecture" type="button">Lecture</button>
+      <div class="grow">
+        <label for="p1-curseur">Époque</label>
+        <input type="range" id="p1-curseur" min="0" value="0" step="1">
+        <span class="curseur-val" id="p1-curseur-val">0</span>
+      </div>
+      <label for="p1-trainee">Traînée
+        <select id="p1-trainee">
+          <option value="-1" selected>complète</option>
+          <option value="0">aucune</option>
+          <option value="10">10 époques</option>
+          <option value="50">50 époques</option>
+        </select>
+      </label>
+      <button id="p1-table-bascule" type="button" aria-pressed="false" aria-controls="p1-table-card">Table</button>
+      <button class="theme" type="button">Thème</button>
+    </div>
+
+    <dl class="tiles" id="p1-tiles"></dl>
+
+    <section class="card">
+      <h2>Carte des embeddings (projection ACP 2D)</h2>
+      <p id="p1-legende-carte"></p>
+      <div class="plot-wrap">
+        <svg id="p1-carte" viewBox="0 0 640 640" role="img"
+             aria-label="Position des mots du vocabulaire dans le plan des deux premières composantes principales, à l'époque sélectionnée."></svg>
+        <div class="tooltip" id="p1-tooltip" hidden></div>
+      </div>
+      <div class="legend" id="p1-legende" role="group" aria-label="Mots affichés"></div>
+    </section>
+
+    <section class="card">
+      <h2>Un mot par panneau</h2>
+      <p>Même échelle et même repère que la carte d'ensemble. Une seule série par panneau : la couleur n'a plus à distinguer sept mots à la fois.</p>
+      <div class="facettes" id="p1-facettes"></div>
+    </section>
+
+    <section class="card" id="p1-table-card" hidden>
+      <h2>Valeurs à l'époque sélectionnée</h2>
+      <p>Les coordonnées brutes sont en dimension D ; <em>x</em> et <em>y</em> sont leur projection sur les deux axes de la carte.</p>
+      <div class="table-scroll">
+        <table><thead id="p1-table-head"></thead><tbody id="p1-table-body"></tbody></table>
+      </div>
+    </section>
+  </section>
+
+  <!-- ============================ PHASE 2 ============================ -->
+  <section id="phase-2" role="tabpanel" aria-labelledby="onglet-2" hidden>
+
+    <section class="card">
+      <h2>Ce qui bouge ici n'est pas ce qui bougeait en phase 1</h2>
+      <p id="p2-explication"></p>
+    </section>
+
+    <div class="controls" role="group" aria-label="Contrôles du renforcement">
+      <button id="p2-lecture" type="button">Lecture</button>
+      <div class="grow">
+        <label for="p2-curseur">Essai</label>
+        <input type="range" id="p2-curseur" min="0" value="0" step="1">
+        <span class="curseur-val" id="p2-curseur-val">0</span>
+      </div>
+      <label for="p2-trainee">Traînée
+        <select id="p2-trainee">
+          <option value="-1" selected>complète</option>
+          <option value="0">aucune</option>
+          <option value="10">10 essais</option>
+          <option value="50">50 essais</option>
+        </select>
+      </label>
+      <button id="p2-table-bascule" type="button" aria-pressed="false" aria-controls="p2-table-card">Table</button>
+      <button class="theme" type="button">Thème</button>
+    </div>
+
+    <dl class="tiles" id="p2-tiles"></dl>
+
+    <section class="card">
+      <h2>Carte des vecteurs de sortie (repère dirigé par h)</h2>
+      <p id="p2-legende-carte"></p>
+      <p id="p2-lecture-carte"></p>
+      <p id="p2-nuance"></p>
+      <p id="p2-mecanique" class="note"></p>
+      <div class="plot-wrap">
+        <svg id="p2-carte" viewBox="0 0 640 640" role="img"
+             aria-label="Position des vecteurs de sortie de chaque mot, et des embeddings figés, dans un repère commun, à l'essai sélectionné."></svg>
+        <div class="tooltip" id="p2-tooltip" hidden></div>
+      </div>
+      <div class="legend" id="p2-legende" role="group" aria-label="Mots affichés"></div>
+    </section>
+
+    <div class="duo">
+      <section class="card">
+        <h2 id="p2-titre-courbe"></h2>
+        <p>Ce que le renforcement cherche à faire monter, essai par essai.</p>
+        <div class="plot-large">
+          <svg id="p2-courbe" viewBox="0 0 640 300" role="img"
+               aria-label="Probabilité du mot cible sachant le contexte, au fil des essais."></svg>
+          <div class="tooltip" id="p2-tooltip-courbe" hidden></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 id="p2-titre-cosinus"></h2>
+        <p>L'un des deux facteurs de h · W : l'angle. L'autre, la norme, est dans la table.</p>
+        <div class="plot-large">
+          <svg id="p2-cosinus" viewBox="0 0 640 300" role="img"
+               aria-label="Cosinus entre le vecteur de sortie de chaque mot et l'embedding du contexte, au fil des essais."></svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 id="p2-titre-distribution"></h2>
+        <p>La distribution complète à l'essai sélectionné.</p>
+        <svg id="p2-barres" viewBox="0 0 640 300" role="img"
+             aria-label="Probabilité de chaque mot sachant le contexte, à l'essai sélectionné."></svg>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>Un mot par panneau</h2>
+      <p>Cinq des sept vecteurs de sortie ne bougent presque pas : seuls le mot récompensé et son concurrent direct se déplacent.</p>
+      <div class="facettes" id="p2-facettes"></div>
+    </section>
+
+    <section class="card" id="p2-table-card" hidden>
+      <h2>Valeurs à l'essai sélectionné</h2>
+      <p>h · W[:,mot] est le logit avant biais : l'alignement entre l'embedding du contexte et le vecteur de sortie du mot.</p>
+      <div class="table-scroll">
+        <table><thead id="p2-table-head"></thead><tbody id="p2-table-body"></tbody></table>
+      </div>
+    </section>
+  </section>
+
+  <!-- ============================ PHASE 3 ============================ -->
+  <section id="phase-3" role="tabpanel" aria-labelledby="onglet-3" hidden>
+
+    <div class="controls" role="group" aria-label="Contrôles de l'inférence">
+      <label for="p3-sequence">Génération
+        <select id="p3-sequence"></select>
+      </label>
+      <div class="grow">
+        <label for="p3-curseur">Pas</label>
+        <input type="range" id="p3-curseur" min="0" value="0" step="1">
+        <span class="curseur-val" id="p3-curseur-val">1</span>
+      </div>
+      <button id="p3-table-bascule" type="button" aria-pressed="false" aria-controls="p3-table-card">Table</button>
+      <button class="theme" type="button">Thème</button>
+    </div>
+
+    <section class="card">
+      <h2>La séquence engendrée</h2>
+      <p>Chaque jeton est un pas de génération : cliquer dessus montre ce qui s'est passé dans le réseau à ce moment-là.</p>
+      <p id="p3-contexte-sequence" class="note"></p>
+      <div class="sequence" id="p3-sequence-jetons"></div>
+    </section>
+
+    <section class="card">
+      <h2>Le parcours du mot dans le réseau</h2>
+      <p id="p3-legende"></p>
+      <figure>
+        <div class="plot-large">
+          <svg id="p3-reseau" viewBox="0 0 900 420" role="img"
+               aria-label="Les quatre étages traversés par le mot courant : embedding, logits, probabilités, tirage du mot suivant."></svg>
+          <div class="tooltip" id="p3-tooltip" hidden></div>
+        </div>
+        <figcaption id="p3-caption"></figcaption>
+      </figure>
+    </section>
+
+    <section class="card">
+      <h2>D'où vient chaque logit</h2>
+      <p id="p3-legende-heatmap"></p>
+      <div class="plot-large">
+        <svg id="p3-heatmap" viewBox="0 0 640 300" role="img"
+             aria-label="Contribution de chaque dimension de l'embedding au logit de chaque mot candidat."></svg>
+        <div class="tooltip" id="p3-tooltip-heatmap" hidden></div>
+      </div>
+      <div class="echelle-div">
+        <span id="p3-echelle-min"></span>
+        <span class="bande" id="p3-bande"></span>
+        <span id="p3-echelle-max"></span>
+        <span>contribution h[d] × W[d, mot]</span>
+      </div>
+    </section>
+
+    <section class="card" id="p3-table-card" hidden>
+      <h2>Valeurs au pas sélectionné</h2>
+      <p>Le logit d'un mot est la somme de ses contributions, plus son biais. La probabilité en découle par softmax à la température de la génération.</p>
+      <div class="table-scroll">
+        <table><thead id="p3-table-head"></thead><tbody id="p3-table-body"></tbody></table>
+      </div>
+    </section>
+  </section>
+
+</div>
+</main>
+<script>
+"use strict";
+
+const DONNEES = /*__DONNEES__*/;
+const VOCAB = DONNEES.vocab;
+const DIM = DONNEES.dimension;
+
+// --- Formes de marqueur : le canal d'identité qui ne dépend pas de la couleur.
+// Sept couleurs catégorielles ne peuvent pas rester distinguables deux à deux
+// sous daltonisme ; la forme et l'étiquette portent donc l'identité avec elles.
+const FORMES = [
+  { nom: "cercle",    chemin: (r) => `M 0,${-r} A ${r},${r} 0 1 1 -0.01,${-r} Z` },
+  { nom: "carré",     chemin: (r) => `M ${-r * 0.88},${-r * 0.88} H ${r * 0.88} V ${r * 0.88} H ${-r * 0.88} Z` },
+  { nom: "triangle",  chemin: (r) => `M 0,${-r * 1.15} L ${r},${r * 0.7} L ${-r},${r * 0.7} Z` },
+  { nom: "losange",   chemin: (r) => `M 0,${-r * 1.2} L ${r * 1.2},0 L 0,${r * 1.2} L ${-r * 1.2},0 Z` },
+  { nom: "triangle inversé", chemin: (r) => `M 0,${r * 1.15} L ${r},${-r * 0.7} L ${-r},${-r * 0.7} Z` },
+  { nom: "croix",     chemin: (r) => { const a = r * 0.42, b = r * 1.15; return `M ${-a},${-b} H ${a} V ${-a} H ${b} V ${a} H ${a} V ${b} H ${-a} V ${a} H ${-b} V ${-a} H ${-a} Z`; } },
+  { nom: "hexagone",  chemin: (r) => { let p = ""; for (let k = 0; k < 6; k++) { const t = Math.PI / 6 + k * Math.PI / 3; p += (k ? " L " : "M ") + (r * Math.cos(t)).toFixed(2) + "," + (r * Math.sin(t)).toFixed(2); } return p + " Z"; } }
+];
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function el(nom, attrs, parent) {
+  const noeud = document.createElementNS(SVG_NS, nom);
+  for (const cle in attrs) noeud.setAttribute(cle, attrs[cle]);
+  if (parent) parent.appendChild(noeud);
+  return noeud;
+}
+
+function texteSvg(parent, x, y, contenu, classe, ancre) {
+  const noeud = el("text", { x, y, class: classe }, parent);
+  if (ancre) noeud.setAttribute("text-anchor", ancre);
+  noeud.textContent = contenu;
+  return noeud;
+}
+
+function nombre(valeur, decimales = 2) {
+  return valeur === null || valeur === undefined || Number.isNaN(valeur)
+    ? "—"
+    : valeur.toFixed(decimales).replace(".", ",");
+}
+
+function marqueur(parent, mot, x, y, r, classe) {
+  return el("path", {
+    d: FORMES[mot % FORMES.length].chemin(r),
+    transform: `translate(${x.toFixed(2)} ${y.toFixed(2)})`,
+    class: `${classe} s${mot + 1}`
+  }, parent);
+}
+
+/** Vignette de légende : la forme du mot, dans sa couleur. */
+function vignette(mot, taille = 16) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", `${-taille / 2} ${-taille / 2} ${taille} ${taille}`);
+  svg.setAttribute("aria-hidden", "true");
+  marqueur(svg, mot, 0, 0, taille * 0.375, "marque");
+  return svg;
+}
+
+// =====================================================================
+// Repère isométrique partagé par les cartes des phases 1 et 2.
+// Les deux axes portent la même unité (des composantes principales) :
+// une échelle différente en x et en y déformerait les distances, qui
+// sont tout le propos de ces cartes.
+// =====================================================================
+const COTE = 640;
+const MARGE = { haut: 18, droite: 18, bas: 40, gauche: 48 };
+
+function creerRepere(svg, meta, graduations) {
+  const dedans = Math.min(COTE - MARGE.gauche - MARGE.droite, COTE - MARGE.haut - MARGE.bas);
+  const ox = MARGE.gauche + (COTE - MARGE.gauche - MARGE.droite) / 2;
+  const oy = MARGE.haut + (COTE - MARGE.haut - MARGE.bas) / 2;
+  const facteur = (dedans / 2) / meta.echelle;
+  const vx = (x) => ox + x * facteur;
+  const vy = (y) => oy - y * facteur;
+
+  const groupe = el("g", {}, svg);
+  const pas = Math.max(0.5, Math.round(meta.echelle / 4 * 2) / 2); // viser ~4 graduations par demi-axe
+  // floor, pas ceil : une graduation hors du domaine serait rabattue sur le
+  // bord, où elle se superposerait à celle de l'autre axe.
+  for (let t = -Math.floor(meta.echelle / pas) * pas; t <= meta.echelle; t += pas) {
+    if (Math.abs(t) < 1e-9) continue;
+    el("line", { x1: vx(t), y1: vy(-meta.echelle), x2: vx(t), y2: vy(meta.echelle), class: "grid-line" }, groupe);
+    el("line", { x1: vx(-meta.echelle), y1: vy(t), x2: vx(meta.echelle), y2: vy(t), class: "grid-line" }, groupe);
+    if (graduations) {
+      texteSvg(groupe, vx(t), vy(-meta.echelle) + 14, nombre(t, 1), "tick", "middle");
+      texteSvg(groupe, vx(-meta.echelle) - 6, vy(t) + 3, nombre(t, 1), "tick", "end");
+    }
+  }
+  el("line", { x1: vx(-meta.echelle), y1: vy(0), x2: vx(meta.echelle), y2: vy(0), class: "axis-line" }, groupe);
+  el("line", { x1: vx(0), y1: vy(-meta.echelle), x2: vx(0), y2: vy(meta.echelle), class: "axis-line" }, groupe);
+
+  if (graduations) {
+    const nom1 = meta.nomAxe1 || `axe 1 — ${Math.round(meta.variance[0] * 100)} % de la variance`;
+    const nom2 = meta.nomAxe2 || `axe 2 — ${Math.round(meta.variance[1] * 100)} %`;
+    texteSvg(groupe, vx(meta.echelle), vy(-meta.echelle) + 30, nom1, "axis-name", "end");
+    texteSvg(groupe, vx(-meta.echelle), vy(meta.echelle) - 6, nom2, "axis-name");
+  }
+  return { vx, vy };
+}
+
+/**
+ * Pose les étiquettes des mots sans les laisser se chevaucher : placement
+ * glouton de haut en bas, puis ligne de rappel quand une étiquette a dû
+ * s'écarter de son point.
+ */
+function poserEtiquettes(groupe, places, classe) {
+  places.sort((a, b) => a.y - b.y);
+  let plancher = -Infinity;
+  for (const place of places) {
+    place.ty = Math.max(place.y, plancher + 17);
+    plancher = place.ty;
+  }
+  for (const place of places) {
+    const aDroite = place.x < COTE - 90;
+    const tx = place.x + (aDroite ? 11 : -11);
+    if (Math.abs(place.ty - place.y) > 2) {
+      el("line", { x1: place.x, y1: place.y, x2: tx, y2: place.ty - 4, class: "leader" }, groupe);
+    }
+    texteSvg(groupe, tx, place.ty + 4, place.texte, classe || "etiquette", aDroite ? "start" : "end");
+  }
+}
+
+// =====================================================================
+// Moteur commun aux phases 1 et 2 : un nuage de vecteurs qui se déplace.
+// =====================================================================
+function creerNuage(options) {
+  const { prefixe, suite, meta, figes, libelleCurseur, tuiles, colonnesTable, ligneTable,
+          detailTooltip, valeurTooltip } = options;
+
+  const etat = { index: 0, trainee: -1, visibles: VOCAB.map(() => true), lecture: false, minuteur: null };
+  const svg = document.getElementById(prefixe + "-carte");
+  const tooltip = document.getElementById(prefixe + "-tooltip");
+  const curseur = document.getElementById(prefixe + "-curseur");
+  const valeurCurseur = document.getElementById(prefixe + "-curseur-val");
+  const boutonLecture = document.getElementById(prefixe + "-lecture");
+  const nbPas = suite.positions.length;
+  let repere;
+  let couchePistes;
+  let coucheMarques;
+  const marquesFacettes = [];
+
+  curseur.max = String(nbPas - 1);
+
+  function bornes() {
+    return [etat.trainee < 0 ? 0 : Math.max(0, etat.index - etat.trainee), etat.index];
+  }
+
+  function dessinerCarte() {
+    svg.textContent = "";
+    repere = creerRepere(svg, meta, true);
+    // Le ou les embeddings de référence, figés pendant toute la phase.
+    if (figes) {
+      const decor = el("g", {}, svg);
+      const places = [];
+      for (const m of figes.mots) {
+        const p = figes.positions[m];
+        if (options.flechesDepuisOrigine) {
+          el("line", { x1: repere.vx(0), y1: repere.vy(0), x2: repere.vx(p[0]), y2: repere.vy(p[1]),
+                       class: `piste s${m + 1}`, "stroke-width": 3, "stroke-dasharray": "6 4" }, decor);
+        }
+        marqueur(decor, m, repere.vx(p[0]), repere.vy(p[1]), 6, "fige");
+        places.push({ x: repere.vx(p[0]), y: repere.vy(p[1]), texte: figes.etiquette(m) });
+      }
+      poserEtiquettes(decor, places, "etiquette-pale");
+    }
+    couchePistes = el("g", {}, svg);
+    coucheMarques = el("g", {}, svg);
+    majCarte();
+  }
+
+  function majCarte() {
+    couchePistes.textContent = "";
+    coucheMarques.textContent = "";
+    const [debut, fin] = bornes();
+
+    for (let m = 0; m < VOCAB.length; m++) {
+      if (!etat.visibles[m]) continue;
+      if (fin > debut) {
+        let points = "";
+        for (let t = debut; t <= fin; t++) {
+          const p = suite.positions[t][m];
+          points += `${repere.vx(p[0]).toFixed(1)},${repere.vy(p[1]).toFixed(1)} `;
+        }
+        el("polyline", { points: points.trim(), class: `piste s${m + 1}`, "stroke-opacity": 0.55 }, couchePistes);
+      }
+      // Le point de départ reste visible : sans lui, on ne sait pas d'où le vecteur vient.
+      const dep = suite.positions[debut][m];
+      marqueur(couchePistes, m, repere.vx(dep[0]), repere.vy(dep[1]), 3, "trace")
+        .setAttribute("fill-opacity", "0.45");
+    }
+
+    const places = [];
+    for (let m = 0; m < VOCAB.length; m++) {
+      if (!etat.visibles[m]) continue;
+      const p = suite.positions[fin][m];
+      places.push({ mot: m, x: repere.vx(p[0]), y: repere.vy(p[1]), texte: VOCAB[m] });
+    }
+    // Un produit scalaire se lit depuis l'origine : on dessine donc les vecteurs
+    // comme des flèches, pas comme des points flottants.
+    if (options.flechesDepuisOrigine) {
+      for (const place of places) {
+        el("line", { x1: repere.vx(0), y1: repere.vy(0), x2: place.x, y2: place.y,
+                     class: `piste s${place.mot + 1}`, "stroke-opacity": 0.85 }, coucheMarques);
+      }
+    }
+    for (const place of places) marqueur(coucheMarques, place.mot, place.x, place.y, 5, "marque");
+    poserEtiquettes(coucheMarques, places.slice());
+  }
+
+  // Couche de survol : le pointeur n'a qu'à être le plus proche, pas pile
+  // sur un marqueur de 10 px.
+  function plusProche(evt) {
+    const boite = svg.getBoundingClientRect();
+    const ech = COTE / boite.width;
+    const px = (evt.clientX - boite.left) * ech;
+    const py = (evt.clientY - boite.top) * ech;
+    let meilleur = null;
+    let distance = Infinity;
+    for (let m = 0; m < VOCAB.length; m++) {
+      if (!etat.visibles[m]) continue;
+      const p = suite.positions[etat.index][m];
+      const d = Math.hypot(repere.vx(p[0]) - px, repere.vy(p[1]) - py);
+      if (d < distance) { distance = d; meilleur = m; }
+    }
+    return distance <= 120 ? meilleur : null;
+  }
+
+  svg.addEventListener("pointermove", (evt) => {
+    const m = plusProche(evt);
+    if (m === null) { tooltip.hidden = true; return; }
+    const boite = svg.getBoundingClientRect();
+    const p = suite.positions[etat.index][m];
+    remplirTooltip(tooltip, valeurTooltip(m, etat.index), detailTooltip(m, etat.index), m);
+    tooltip.hidden = false;
+    tooltip.style.left = (repere.vx(p[0]) / COTE * boite.width) + "px";
+    tooltip.style.top = (repere.vy(p[1]) / COTE * boite.width) + "px";
+  });
+  svg.addEventListener("pointerleave", () => { tooltip.hidden = true; });
+
+  function construireFacettes() {
+    const hote = document.getElementById(prefixe + "-facettes");
+    hote.textContent = "";
+    marquesFacettes.length = 0;
+    const dernier = nbPas - 1;
+
+    for (let m = 0; m < VOCAB.length; m++) {
+      const bloc = document.createElement("div");
+      bloc.className = "facette";
+
+      const titre = document.createElement("h3");
+      titre.appendChild(vignette(m, 12));
+      const nom = document.createElement("span");
+      nom.textContent = VOCAB[m];
+      titre.appendChild(nom);
+      const chiffre = document.createElement("span");
+      chiffre.className = "chiffre";
+      chiffre.textContent = "chemin " + nombre(suite.chemin[dernier][m], 2);
+      titre.appendChild(chiffre);
+      bloc.appendChild(titre);
+
+      const mini = document.createElementNS(SVG_NS, "svg");
+      mini.setAttribute("viewBox", "0 0 640 640");
+      mini.setAttribute("role", "img");
+      mini.setAttribute("aria-label", `Trajectoire de « ${VOCAB[m]} »`);
+      const repereMini = creerRepere(mini, meta, false);
+      let points = "";
+      for (let t = 0; t <= dernier; t++) {
+        const p = suite.positions[t][m];
+        points += `${repereMini.vx(p[0]).toFixed(1)},${repereMini.vy(p[1]).toFixed(1)} `;
+      }
+      el("polyline", { points: points.trim(), class: `piste s${m + 1}`, "stroke-opacity": 0.5 }, mini);
+      const dep = suite.positions[0][m];
+      marqueur(mini, m, repereMini.vx(dep[0]), repereMini.vy(dep[1]), 4, "trace")
+        .setAttribute("fill-opacity", "0.45");
+      marquesFacettes.push({ noeud: marqueur(mini, m, 0, 0, 9, "marque"), repere: repereMini });
+
+      bloc.appendChild(mini);
+      hote.appendChild(bloc);
+    }
+  }
+
+  function majFacettes() {
+    for (let m = 0; m < marquesFacettes.length; m++) {
+      const p = suite.positions[etat.index][m];
+      const { noeud, repere: r } = marquesFacettes[m];
+      noeud.setAttribute("transform", `translate(${r.vx(p[0]).toFixed(2)} ${r.vy(p[1]).toFixed(2)})`);
+    }
+  }
+
+  function construireLegende() {
+    const hote = document.getElementById(prefixe + "-legende");
+    hote.textContent = "";
+    for (let m = 0; m < VOCAB.length; m++) {
+      const bouton = document.createElement("button");
+      bouton.type = "button";
+      bouton.setAttribute("aria-pressed", "true");
+      bouton.appendChild(vignette(m, 14));
+      const nom = document.createElement("span");
+      nom.className = "mot";
+      nom.textContent = VOCAB[m];
+      bouton.appendChild(nom);
+      bouton.addEventListener("click", () => {
+        etat.visibles[m] = !etat.visibles[m];
+        bouton.setAttribute("aria-pressed", String(etat.visibles[m]));
+        majCarte();
+        majTable();
+      });
+      hote.appendChild(bouton);
+    }
+    if (figes) {
+      const note = document.createElement("span");
+      note.className = "legend-note";
+      const svgNote = document.createElementNS(SVG_NS, "svg");
+      svgNote.setAttribute("viewBox", "-8 -8 16 16");
+      svgNote.setAttribute("aria-hidden", "true");
+      el("path", { d: FORMES[figes.mots[0] % FORMES.length].chemin(6),
+                   class: `fige s${figes.mots[0] + 1}` }, svgNote);
+      note.appendChild(svgNote);
+      note.appendChild(document.createTextNode(figes.noteLegende));
+      hote.appendChild(note);
+    }
+  }
+
+  function construireTuiles() {
+    const hote = document.getElementById(prefixe + "-tiles");
+    hote.textContent = "";
+    for (const def of tuiles) {
+      const bloc = document.createElement("div");
+      bloc.className = "tile";
+      const dt = document.createElement("dt");
+      dt.textContent = def.titre;
+      const dd = document.createElement("dd");
+      dd._def = def;
+      bloc.appendChild(dt);
+      bloc.appendChild(dd);
+      hote.appendChild(bloc);
+    }
+  }
+
+  function majTuiles() {
+    for (const dd of document.querySelectorAll("#" + prefixe + "-tiles dd")) {
+      dd.textContent = dd._def.valeur(etat.index);
+      const small = document.createElement("small");
+      small.textContent = " " + dd._def.detail(etat.index);
+      dd.appendChild(small);
+    }
+  }
+
+  function majTable() {
+    const tete = document.getElementById(prefixe + "-table-head");
+    const corps = document.getElementById(prefixe + "-table-body");
+    tete.textContent = "";
+    corps.textContent = "";
+
+    const ligneTete = document.createElement("tr");
+    for (const col of colonnesTable) {
+      const th = document.createElement("th");
+      th.scope = "col";
+      th.textContent = col;
+      ligneTete.appendChild(th);
+    }
+    tete.appendChild(ligneTete);
+
+    for (let m = 0; m < VOCAB.length; m++) {
+      if (!etat.visibles[m]) continue;
+      const tr = document.createElement("tr");
+      const th = document.createElement("th");
+      th.scope = "row";
+      const pastille = document.createElement("span");
+      pastille.className = "cle-table";
+      pastille.style.background = `var(--series-${m + 1})`;
+      th.appendChild(pastille);
+      th.appendChild(document.createTextNode(VOCAB[m]));
+      tr.appendChild(th);
+      for (const valeur of ligneTable(m, etat.index)) {
+        const td = document.createElement("td");
+        td.textContent = valeur;
+        tr.appendChild(td);
+      }
+      corps.appendChild(tr);
+    }
+  }
+
+  function rendre(avecCallback = true) {
+    valeurCurseur.textContent = String(options.etiquetteIndex(etat.index));
+    majCarte();
+    majFacettes();
+    majTuiles();
+    majTable();
+    tooltip.hidden = true;
+    if (avecCallback && options.auChangement) options.auChangement(etat.index);
+  }
+
+  curseur.addEventListener("input", () => { etat.index = Number(curseur.value); rendre(); });
+  document.getElementById(prefixe + "-trainee").addEventListener("change", (evt) => {
+    etat.trainee = Number(evt.target.value);
+    majCarte();
+  });
+  boutonLecture.addEventListener("click", () => {
+    etat.lecture = !etat.lecture;
+    boutonLecture.textContent = etat.lecture ? "Pause" : "Lecture";
+    if (etat.lecture) {
+      if (etat.index >= nbPas - 1) etat.index = 0;
+      etat.minuteur = setInterval(() => {
+        etat.index++;
+        if (etat.index >= nbPas - 1) {
+          etat.index = nbPas - 1;
+          clearInterval(etat.minuteur);
+          etat.lecture = false;
+          boutonLecture.textContent = "Lecture";
+        }
+        curseur.value = String(etat.index);
+        rendre();
+      }, 40);
+    } else {
+      clearInterval(etat.minuteur);
+    }
+  });
+  brancherTable(prefixe);
+
+  construireTuiles();
+  construireLegende();
+  dessinerCarte();
+  construireFacettes();
+  rendre(false);
+  return { etat, rendre };
+}
+
+/** Tooltip commun : la valeur mène, l'étiquette suit. */
+function remplirTooltip(tooltip, entete, lignes, mot) {
+  tooltip.textContent = "";
+  const tete = document.createElement("div");
+  if (mot !== undefined && mot !== null) {
+    const cle = document.createElement("span");
+    cle.className = "cle";
+    cle.style.background = `var(--series-${mot + 1})`;
+    tete.appendChild(cle);
+  }
+  const val = document.createElement("span");
+  val.className = "val";
+  val.textContent = entete.valeur;
+  tete.appendChild(val);
+  const lab = document.createElement("span");
+  lab.className = "lab";
+  lab.textContent = " " + entete.libelle;
+  tete.appendChild(lab);
+  tooltip.appendChild(tete);
+
+  const dl = document.createElement("dl");
+  for (const [cle, valeur] of lignes) {
+    const dt = document.createElement("dt");
+    dt.textContent = cle;
+    const dd = document.createElement("dd");
+    dd.textContent = valeur;
+    dl.appendChild(dt);
+    dl.appendChild(dd);
+  }
+  tooltip.appendChild(dl);
+}
+
+function brancherTable(prefixe) {
+  const bouton = document.getElementById(prefixe + "-table-bascule");
+  bouton.addEventListener("click", () => {
+    const carte = document.getElementById(prefixe + "-table-card");
+    const ouvert = carte.hidden;
+    carte.hidden = !ouvert;
+    bouton.setAttribute("aria-pressed", String(ouvert));
+  });
+}
+
+// =====================================================================
+// PHASE 1 : déplacement des embeddings
+// =====================================================================
+const P1 = DONNEES.phase1;
+
+creerNuage({
+  prefixe: "p1",
+  suite: P1,
+  meta: P1,
+  figes: null,
+  etiquetteIndex: (i) => P1.epoques[i],
+  tuiles: [
+    { titre: "Époque", valeur: (i) => String(P1.epoques[i]), detail: () => "sur " + P1.epoques[P1.epoques.length - 1] },
+    { titre: "Perte moyenne", valeur: (i) => nombre(P1.pertes[i], 4), detail: () => "entropie croisée" },
+    { titre: "Chemin cumulé", valeur: (i) => nombre(P1.cheminTotal[i], 2), detail: () => "tous mots, en D=" + DIM },
+    { titre: "Rayon du nuage", valeur: (i) => nombre(P1.rayons[i], 2), detail: () => "dans le plan de la carte" }
+  ],
+  colonnesTable: ["mot", "marqueur"].concat([...Array(DIM).keys()].map((d) => "d" + d))
+    .concat(["x", "y", "pas", "chemin", "norme"]),
+  ligneTable: (m, i) => [FORMES[m % FORMES.length].nom]
+    .concat(P1.vecteurs[i][m].map((v) => nombre(v, 3)))
+    .concat([nombre(P1.positions[i][m][0], 3), nombre(P1.positions[i][m][1], 3),
+             nombre(P1.pas[i][m], 4), nombre(P1.chemin[i][m], 3), nombre(P1.normes[i][m], 3)]),
+  valeurTooltip: (m, i) => ({ valeur: nombre(P1.chemin[i][m], 3), libelle: "de chemin parcouru" }),
+  detailTooltip: (m, i) => [
+    ["mot", VOCAB[m]],
+    ["marqueur", FORMES[m % FORMES.length].nom],
+    ["pas de l'époque", nombre(P1.pas[i][m], 4)],
+    ["norme du vecteur", nombre(P1.normes[i][m], 3)],
+    ["vecteur (D=" + DIM + ")", "[" + P1.vecteurs[i][m].map((v) => nombre(v, 2)).join("  ") + "]"],
+    ["x, y sur la carte", nombre(P1.positions[i][m][0], 2) + " ; " + nombre(P1.positions[i][m][1], 2)]
+  ]
+});
+
+document.getElementById("p1-legende-carte").textContent =
+  "Trait = trajectoire suivie, marqueur plein = position à l'époque sélectionnée, marqueur pâle = point de départ. "
+  + "Chaque mot a sa couleur et sa forme : sept couleurs ne restent pas distinguables deux à deux sous daltonisme, "
+  + "la forme et l'étiquette portent donc l'identité avec elles.";
+
+// =====================================================================
+// PHASE 2 : déplacement des vecteurs de sortie
+// =====================================================================
+const P2 = DONNEES.phase2;
+const CONTEXTE = VOCAB[P2.contexte];
+const CIBLE = VOCAB[P2.cible];
+
+const H_CONTEXTE = P2.embeddings.vecteurs[P2.contexte];
+const NORME_H = Math.hypot(...H_CONTEXTE);
+
+/** h · W[:,mot] : le logit avant biais, ce que le renforcement manipule. */
+function alignement(m, i) {
+  let somme = 0;
+  for (let d = 0; d < DIM; d++) somme += H_CONTEXTE[d] * P2.vecteurs[i][m][d];
+  return somme;
+}
+
+/**
+ * h · W = ‖h‖ × ‖W‖ × cos(angle). Séparer les deux facteurs est indispensable :
+ * un produit scalaire peut monter parce que le vecteur pivote vers h (cosinus),
+ * ou simplement parce qu'il s'allonge (norme). Ici, c'est surtout la seconde.
+ */
+function cosinusAvecH(m, i) {
+  const n = P2.normes[i][m];
+  return n < 1e-9 ? 0 : alignement(m, i) / (n * NORME_H);
+}
+
+const nuage2 = creerNuage({
+  prefixe: "p2",
+  suite: P2,
+  meta: Object.assign({}, P2, {
+    nomAxe1: "h · W / ‖h‖ — la composante alignée avec h (exacte)",
+    nomAxe2: "ce qu'il reste, perpendiculaire à h"
+  }),
+  flechesDepuisOrigine: true,
+  // Seul l'embedding du CONTEXTE entre dans h · W : afficher les six autres
+  // doublait chaque mot à l'écran sans rien expliquer.
+  figes: {
+    positions: P2.embeddings.positions,
+    mots: [P2.contexte],
+    etiquette: (m) => "h = E[" + VOCAB[m] + "]",
+    noteLegende: "tireté = h, l'embedding du contexte, immobile toute la phase"
+  },
+  etiquetteIndex: (i) => P2.essais[i],
+  tuiles: [
+    { titre: "Essai", valeur: (i) => String(P2.essais[i]), detail: () => "sur " + P2.essais[P2.essais.length - 1] },
+    { titre: "P(" + CIBLE + " | " + CONTEXTE + ")", valeur: (i) => nombre(P2.probabilites[i][P2.cible], 3), detail: () => "ce que le RL fait monter" },
+    { titre: "Récompense moyenne", valeur: (i) => nombre(P2.recompenseMoyenne[i], 3), detail: () => "depuis le début" },
+    { titre: "Chemin cumulé", valeur: (i) => nombre(P2.cheminTotal[i], 3), detail: () => "tous vecteurs de sortie" }
+  ],
+  colonnesTable: ["mot", "marqueur"].concat([...Array(DIM).keys()].map((d) => "W[" + d + "]"))
+    .concat(["‖W‖", "cos(W, h)", "h · W", "biais", "logit", "P(·|" + CONTEXTE + ")", "chemin"]),
+  ligneTable: (m, i) => [FORMES[m % FORMES.length].nom]
+    .concat(P2.vecteurs[i][m].map((v) => nombre(v, 3)))
+    .concat([nombre(P2.normes[i][m], 3), nombre(cosinusAvecH(m, i), 3),
+             nombre(alignement(m, i), 3), nombre(P2.biais[i][m], 3),
+             nombre(alignement(m, i) + P2.biais[i][m], 3),
+             nombre(P2.probabilites[i][m], 4), nombre(P2.chemin[i][m], 3)]),
+  valeurTooltip: (m, i) => ({ valeur: nombre(P2.probabilites[i][m], 3), libelle: "de probabilité après « " + CONTEXTE + " »" }),
+  detailTooltip: (m, i) => [
+    ["mot", VOCAB[m] + (m === P2.cible ? " (cible)" : "")],
+    ["h · W[:,mot]", nombre(alignement(m, i), 3)],
+    ["dont cos(W, h)", nombre(cosinusAvecH(m, i), 3)],
+    ["dont ‖W‖", nombre(P2.normes[i][m], 3)],
+    ["biais", nombre(P2.biais[i][m], 3)],
+    ["vecteur de sortie", "[" + P2.vecteurs[i][m].map((v) => nombre(v, 2)).join("  ") + "]"]
+  ],
+  auChangement: (i) => { majCourbe(i); majCosinus(i); majBarres(i); }
+});
+
+const COS_DEBUT = cosinusAvecH(P2.cible, 0);
+const COS_FIN = cosinusAvecH(P2.cible, P2.vecteurs.length - 1);
+const NORME_DEBUT = P2.normes[0][P2.cible];
+const NORME_FIN = P2.normes[P2.normes.length - 1][P2.cible];
+
+document.getElementById("p2-explication").textContent =
+  `Le renforcement ne met à jour que W et b, jamais E : les embeddings ne bougent pas d'un pouce pendant cette phase. `
+  + `Ce qui se déplace, ce sont les vecteurs de sortie, c'est-à-dire les colonnes de W. Or `
+  + `logit(mot) = h · W[:,mot] + b, avec h l'embedding du contexte, ici « ${CONTEXTE} ». Un vecteur de sortie vit donc `
+  + `dans le même espace que les embeddings — même dualité que dans un vrai LLM entre la matrice d'embedding et celle `
+  + `de dé-embedding — et c'est son produit scalaire avec h qui décide de la probabilité du mot.`;
+
+document.getElementById("p2-legende-carte").textContent =
+  `Ce repère n'est pas une ACP : son axe horizontal est la direction de h elle-même, si bien que l'abscisse d'une flèche `
+  + `vaut exactement h · W / ‖h‖ — on retrouve h · W en la multipliant par ‖h‖ = ${nombre(NORME_H, 2)}. `
+  + `L'axe vertical porte ce qu'il reste du vecteur, perpendiculairement à h, et n'intervient pas dans le logit. `
+  + `La flèche tiretée est h ; le trait fin derrière chaque flèche est le chemin suivi par son extrémité.`;
+
+// L'abscisse ne fait pas tout : il reste le biais, qui ne dépend pas de h. À
+// l'essai final il suffit à inverser deux mots du classement, donc « plus à
+// droite = plus probable » serait faux écrit sans réserve.
+document.getElementById("p2-nuance").textContent =
+  `Aller à droite ne suffit pourtant pas à être choisi : le logit vaut h · W + b, et le biais b est propre à chaque mot, `
+  + `indépendant de h. ${inversionsDuBiais()} Et comme le softmax normalise, un mot n'est probable que relativement aux `
+  + `autres : c'est l'écart des logits qui compte, pas leur valeur absolue.`;
+
+/** Décrit, s'il y en a, les mots que le biais fait changer de place dans le classement. */
+function inversionsDuBiais() {
+  const i = P2.positions.length - 1;
+  const parAlignement = [...VOCAB.keys()].sort((a, b) => alignement(b, i) - alignement(a, i));
+  const parLogit = [...VOCAB.keys()].sort(
+    (a, b) => (alignement(b, i) + P2.biais[i][b]) - (alignement(a, i) + P2.biais[i][a]));
+  for (let r = 0; r < parAlignement.length; r++) {
+    const m = parAlignement[r];
+    const rangLogit = parLogit.indexOf(m);
+    if (rangLogit > r) {
+      const double = parLogit[r];
+      return `À l'essai ${P2.essais[i]}, « ${VOCAB[m]} » est mieux aligné que « ${VOCAB[double]} » `
+        + `(h · W : ${nombre(alignement(m, i), 2)} contre ${nombre(alignement(double, i), 2)}), et pourtant son logit est `
+        + `plus bas (${nombre(alignement(m, i) + P2.biais[i][m], 2)} contre `
+        + `${nombre(alignement(double, i) + P2.biais[i][double], 2)}) : le biais de « ${VOCAB[double]} », `
+        + `${nombre(P2.biais[i][double], 2)}, renverse l'écart.`;
+    }
+  }
+  return "Ici, le biais ne suffit à renverser aucun classement.";
+}
+
+// Le fait mesuré, pas celui qu'on aurait aimé voir : « dort » gagne surtout en
+// longueur, son angle ne bouge que de quelques centièmes de cosinus.
+const X_CIBLE_DEBUT = P2.positions[0][P2.cible][0];
+const X_CIBLE_FIN = P2.positions[P2.positions.length - 1][P2.cible][0];
+const X_CONCURRENT_DEBUT = P2.positions[0][concurrent()][0];
+const X_CONCURRENT_FIN = P2.positions[P2.positions.length - 1][concurrent()][0];
+
+document.getElementById("p2-lecture-carte").textContent =
+  `Aucune flèche ne « va vers » h, et il faut insister là-dessus : toutes GLISSENT le long de l'axe horizontal, `
+  + `à hauteur constante. « ${CIBLE} » glisse vers la droite, de ${nombre(X_CIBLE_DEBUT, 2)} à `
+  + `${nombre(X_CIBLE_FIN, 2)} — il passe donc au-delà de h, qui est à ${nombre(NORME_H, 2)}, et continue : `
+  + `sa distance à h finit par augmenter, alors que sa probabilité ne cesse de monter. `
+  + `« ${VOCAB[concurrent()]} » glisse en sens inverse, de ${nombre(X_CONCURRENT_DEBUT, 2)} à `
+  + `${nombre(X_CONCURRENT_FIN, 2)}. Les cinq autres bougent à peine : leur mot n'a presque jamais été tiré.`;
+
+document.getElementById("p2-mecanique").textContent =
+  `Pourquoi des trajectoires horizontales ? Parce que la mise à jour de REINFORCE vaut `
+  + `lr × récompense × (1 − p) × h pour le mot tiré, et − lr × récompense × p × h pour chacun des autres. `
+  + `Tous ces gradients sont des multiples de h : la phase 2 ne peut qu'ajouter ou retrancher du h à chaque colonne `
+  + `de W, donc elle ne touche jamais à la part perpendiculaire à h. Vérification sur la carte : le plus grand écart `
+  + `vertical observé, sur les ${P2.positions.length} essais et les ${VOCAB.length} mots, vaut `
+  + `${ecartPerpendiculaireMax().toFixed(5).replace(".", ",")}. Tout se joue sur une seule droite — mais c'est un `
+  + `artefact de ce mini-modèle, où le contexte est toujours « ${CONTEXTE} ». Avec plusieurs contextes, chaque essai `
+  + `pousserait dans la direction d'un h différent, et la géométrie serait bien plus riche.`;
+
+/**
+ * Plus grand écart d'ordonnée observé sur toute la phase, toutes séries
+ * confondues. L'ordonnée porte la part perpendiculaire à h : si le gradient est
+ * toujours un multiple de h, cette part ne peut pas changer, et cette mesure
+ * doit rester nulle. C'est une vérification, pas une affirmation.
+ */
+function ecartPerpendiculaireMax() {
+  let max = 0;
+  for (let m = 0; m < VOCAB.length; m++) {
+    const depart = P2.positions[0][m][1];
+    for (let t = 1; t < P2.positions.length; t++) {
+      max = Math.max(max, Math.abs(P2.positions[t][m][1] - depart));
+    }
+  }
+  return max;
+}
+
+/** Le mot qui perd le plus d'alignement : le concurrent direct de la cible. */
+function concurrent() {
+  let pire = 0;
+  let perte = 0;
+  const dernier = P2.vecteurs.length - 1;
+  for (let m = 0; m < VOCAB.length; m++) {
+    if (m === P2.cible) continue;
+    const delta = alignement(m, 0) - alignement(m, dernier);
+    if (delta > perte) { perte = delta; pire = m; }
+  }
+  return pire;
+}
+
+document.getElementById("p2-titre-courbe").textContent = `P(${CIBLE} | ${CONTEXTE}) au fil des essais`;
+document.getElementById("p2-titre-cosinus").textContent = `cos(W[:,mot], h) au fil des essais`;
+document.getElementById("p2-titre-distribution").textContent = `Distribution après « ${CONTEXTE} »`;
+
+// --- Courbe de la probabilité cible -----------------------------------
+const COURBE = { gauche: 46, droite: 14, haut: 14, bas: 44, largeur: 640, hauteur: 300 };
+const courbeSvg = document.getElementById("p2-courbe");
+const courbeTooltip = document.getElementById("p2-tooltip-courbe");
+let courbeRepere;
+let courbeCurseurVisuel;
+
+function construireCourbe() {
+  const n = P2.essais.length - 1;
+  const cx = (i) => COURBE.gauche + (i / n) * (COURBE.largeur - COURBE.gauche - COURBE.droite);
+  const cy = (p) => COURBE.hauteur - COURBE.bas - p * (COURBE.hauteur - COURBE.haut - COURBE.bas);
+  courbeRepere = { cx, cy, n };
+
+  courbeSvg.textContent = "";
+  for (let t = 0; t <= 1.0001; t += 0.25) {
+    el("line", { x1: COURBE.gauche, y1: cy(t), x2: COURBE.largeur - COURBE.droite, y2: cy(t), class: "grid-line" }, courbeSvg);
+    texteSvg(courbeSvg, COURBE.gauche - 7, cy(t) + 3, nombre(t, 2), "tick", "end");
+  }
+  el("line", { x1: COURBE.gauche, y1: cy(0), x2: COURBE.largeur - COURBE.droite, y2: cy(0), class: "axis-line" }, courbeSvg);
+  for (const t of [0, Math.round(n / 2), n]) {
+    texteSvg(courbeSvg, cx(t), COURBE.hauteur - COURBE.bas + 16, String(P2.essais[t]), "tick", "middle");
+  }
+  texteSvg(courbeSvg, (COURBE.gauche + COURBE.largeur - COURBE.droite) / 2,
+    COURBE.hauteur - COURBE.bas + 34, "essai", "axis-name", "middle");
+
+  let points = "";
+  for (let t = 0; t <= n; t++) points += `${cx(t).toFixed(1)},${cy(P2.probabilites[t][P2.cible]).toFixed(1)} `;
+  el("polyline", { points: points.trim(), class: `piste s${P2.cible + 1}` }, courbeSvg);
+
+  courbeCurseurVisuel = el("g", {}, courbeSvg);
+}
+
+function majCourbe(i) {
+  if (!courbeCurseurVisuel) return;
+  courbeCurseurVisuel.textContent = "";
+  const { cx, cy } = courbeRepere;
+  const x = cx(i);
+  el("line", { x1: x, y1: COURBE.haut, x2: x, y2: COURBE.hauteur - COURBE.bas, class: "axis-line" }, courbeCurseurVisuel);
+  marqueur(courbeCurseurVisuel, P2.cible, x, cy(P2.probabilites[i][P2.cible]), 5, "marque");
+  const aDroite = x < COURBE.largeur - 80;
+  texteSvg(courbeCurseurVisuel, x + (aDroite ? 9 : -9), cy(P2.probabilites[i][P2.cible]) - 8,
+    nombre(P2.probabilites[i][P2.cible], 3), "etiquette", aDroite ? "start" : "end");
+}
+
+courbeSvg.addEventListener("pointermove", (evt) => {
+  const boite = courbeSvg.getBoundingClientRect();
+  const px = (evt.clientX - boite.left) * (COURBE.largeur / boite.width);
+  const i = Math.round(((px - COURBE.gauche) / (COURBE.largeur - COURBE.gauche - COURBE.droite)) * courbeRepere.n);
+  if (i < 0 || i > courbeRepere.n) { courbeTooltip.hidden = true; return; }
+  remplirTooltip(courbeTooltip,
+    { valeur: nombre(P2.probabilites[i][P2.cible], 3), libelle: `P(${CIBLE} | ${CONTEXTE})` },
+    [["essai", String(P2.essais[i])],
+     ["mot tiré", P2.actions[i] < 0 ? "—" : VOCAB[P2.actions[i]]],
+     ["récompense", nombre(P2.recompenses[i], 1)],
+     ["récompense moyenne", nombre(P2.recompenseMoyenne[i], 3)]],
+    P2.cible);
+  courbeTooltip.hidden = false;
+  courbeTooltip.style.left = (courbeRepere.cx(i) / COURBE.largeur * boite.width) + "px";
+  courbeTooltip.style.top = (courbeRepere.cy(P2.probabilites[i][P2.cible]) / COURBE.largeur * boite.width) + "px";
+});
+courbeSvg.addEventListener("pointerleave", () => { courbeTooltip.hidden = true; });
+
+// --- Le facteur angulaire de h · W ------------------------------------
+const cosinusSvg = document.getElementById("p2-cosinus");
+const COS = { gauche: 46, droite: 74, haut: 14, bas: 44, largeur: 640, hauteur: 300 };
+let cosRepere;
+let cosCurseurVisuel;
+
+function construireCosinus() {
+  const n = P2.essais.length - 1;
+  const cx = (i) => COS.gauche + (i / n) * (COS.largeur - COS.gauche - COS.droite);
+  const cy = (v) => (COS.hauteur - COS.bas + COS.haut) / 2 - v * (COS.hauteur - COS.haut - COS.bas) / 2;
+  cosRepere = { cx, cy, n };
+  cosinusSvg.textContent = "";
+
+  for (let t = -1; t <= 1.0001; t += 0.5) {
+    el("line", { x1: COS.gauche, y1: cy(t), x2: COS.largeur - COS.droite, y2: cy(t),
+                 class: Math.abs(t) < 1e-9 ? "axis-line" : "grid-line" }, cosinusSvg);
+    texteSvg(cosinusSvg, COS.gauche - 7, cy(t) + 3, nombre(t, 1), "tick", "end");
+  }
+  for (const t of [0, Math.round(n / 2), n]) {
+    texteSvg(cosinusSvg, cx(t), COS.hauteur - COS.bas + 16, String(P2.essais[t]), "tick", "middle");
+  }
+  texteSvg(cosinusSvg, (COS.gauche + COS.largeur - COS.droite) / 2, COS.hauteur - COS.bas + 34,
+    "essai", "axis-name", "middle");
+
+  for (let m = 0; m < VOCAB.length; m++) {
+    let points = "";
+    for (let t = 0; t <= n; t++) points += `${cx(t).toFixed(1)},${cy(cosinusAvecH(m, t)).toFixed(1)} `;
+    el("polyline", { points: points.trim(), class: `piste s${m + 1}`, "stroke-opacity": 0.85 }, cosinusSvg);
+  }
+
+  // Étiquettes directes à l'extrémité droite, écartées si elles se cognent :
+  // sept lignes dont deux bougent, une légende de plus n'aiderait personne.
+  const places = [];
+  for (let m = 0; m < VOCAB.length; m++) {
+    places.push({ mot: m, y: cy(cosinusAvecH(m, n)) });
+  }
+  places.sort((a, b) => a.y - b.y);
+  let plancher = -Infinity;
+  for (const place of places) {
+    place.ty = Math.max(place.y, plancher + 14);
+    plancher = place.ty;
+    marqueur(cosinusSvg, place.mot, cx(n), place.y, 4, "marque");
+    if (Math.abs(place.ty - place.y) > 2) {
+      el("line", { x1: cx(n) + 3, y1: place.y, x2: cx(n) + 10, y2: place.ty - 4, class: "leader" }, cosinusSvg);
+    }
+    texteSvg(cosinusSvg, cx(n) + 12, place.ty + 4, VOCAB[place.mot], "etiquette");
+  }
+
+  cosCurseurVisuel = el("g", {}, cosinusSvg);
+}
+
+function majCosinus(i) {
+  if (!cosCurseurVisuel) return;
+  cosCurseurVisuel.textContent = "";
+  const x = cosRepere.cx(i);
+  el("line", { x1: x, y1: COS.haut, x2: x, y2: COS.hauteur - COS.bas, class: "axis-line" }, cosCurseurVisuel);
+}
+
+// --- Barres de la distribution ----------------------------------------
+const barresSvg = document.getElementById("p2-barres");
+
+function majBarres(i) {
+  const gauche = 56;
+  const droite = 44;
+  const haut = 10;
+  const bas = 26;
+  const largeur = 640;
+  const hauteur = 300;
+  const pasY = (hauteur - haut - bas) / VOCAB.length;
+  barresSvg.textContent = "";
+
+  for (let t = 0; t <= 1.0001; t += 0.25) {
+    const x = gauche + t * (largeur - gauche - droite);
+    el("line", { x1: x, y1: haut, x2: x, y2: hauteur - bas, class: "grid-line" }, barresSvg);
+    texteSvg(barresSvg, x, hauteur - bas + 16, nombre(t, 2), "tick", "middle");
+  }
+  el("line", { x1: gauche, y1: haut, x2: gauche, y2: hauteur - bas, class: "axis-line" }, barresSvg);
+
+  for (let m = 0; m < VOCAB.length; m++) {
+    const y = haut + m * pasY;
+    const p = P2.probabilites[i][m];
+    const w = Math.max(0, p * (largeur - gauche - droite));
+    // 4px d'extrémité arrondie, ancrée sur la ligne de base.
+    el("rect", { x: gauche, y: y + 4, width: w, height: pasY - 8, rx: 4,
+                 class: `barre s${m + 1}` }, barresSvg);
+    texteSvg(barresSvg, gauche - 7, y + pasY / 2 + 4, VOCAB[m], "cellule-nom", "end");
+    texteSvg(barresSvg, gauche + w + 7, y + pasY / 2 + 4, nombre(p, 3),
+      m === P2.cible ? "valeur" : "valeur-pale");
+  }
+}
+
+// =====================================================================
+// PHASE 3 : le parcours d'un mot dans le réseau
+// =====================================================================
+const P3 = DONNEES.phase3;
+const etat3 = { sequence: 0, pas: 0 };
+
+// Les générations sont regroupées par température : à T = 0 le tirage est
+// déterministe, donc ce qui varie est l'amorce ; au-dessus, c'est le tirage.
+const selecteur = document.getElementById("p3-sequence");
+let groupeCourant = null;
+let temperatureGroupe = null;
+const vus = new Map();
+P3.sequences.forEach((sequence, index) => {
+  if (sequence.temperature !== temperatureGroupe) {
+    temperatureGroupe = sequence.temperature;
+    groupeCourant = document.createElement("optgroup");
+    groupeCourant.label = `T = ${nombre(sequence.temperature, 1)}`
+      + (sequence.temperature === 0 ? " — déterministe" : " — tirage aléatoire");
+    selecteur.appendChild(groupeCourant);
+  }
+  const cle = sequence.temperature + "|" + sequence.amorce;
+  const rang = (vus.get(cle) || 0) + 1;
+  vus.set(cle, rang);
+  const option = document.createElement("option");
+  option.value = String(index);
+  option.textContent = `depuis « ${sequence.amorce} » → « ${sequence.texte} »`
+    + (sequence.temperature === 0 ? "" : `  (tirage ${rang})`);
+  groupeCourant.appendChild(option);
+});
+
+function sequenceCourante() { return P3.sequences[etat3.sequence]; }
+function pasCourant() { return sequenceCourante().pas[etat3.pas]; }
+
+function construireJetons() {
+  const hote = document.getElementById("p3-sequence-jetons");
+  hote.textContent = "";
+  const sequence = sequenceCourante();
+  const amorce = document.createElement("button");
+  amorce.type = "button";
+  amorce.textContent = sequence.amorce;
+  amorce.setAttribute("aria-pressed", String(etat3.pas === 0));
+  amorce.addEventListener("click", () => choisirPas(0));
+  hote.appendChild(amorce);
+
+  sequence.pas.forEach((pas, index) => {
+    const fleche = document.createElement("span");
+    fleche.className = "fleche-seq";
+    fleche.textContent = "→";
+    hote.appendChild(fleche);
+    const bouton = document.createElement("button");
+    bouton.type = "button";
+    bouton.textContent = VOCAB[pas.motChoisi];
+    bouton.setAttribute("aria-pressed", String(etat3.pas === index));
+    bouton.addEventListener("click", () => choisirPas(index));
+    hote.appendChild(bouton);
+  });
+}
+
+function choisirPas(index) {
+  etat3.pas = index;
+  document.getElementById("p3-curseur").value = String(index);
+  rendrePhase3();
+}
+
+// --- Le schéma du réseau ----------------------------------------------
+const reseauSvg = document.getElementById("p3-reseau");
+const reseauTooltip = document.getElementById("p3-tooltip");
+
+function dessinerReseau() {
+  const pas = pasCourant();
+  const sequence = sequenceCourante();
+  reseauSvg.textContent = "";
+
+  const defs = el("defs", {}, reseauSvg);
+  const marker = el("marker", { id: "fleche-tete", viewBox: "0 0 10 10", refX: "9", refY: "5",
+    markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" }, defs);
+  el("path", { d: "M 0 1 L 9 5 L 0 9 z", fill: "currentColor" }, marker);
+  marker.setAttribute("class", "fleche-tete");
+
+  // Les titres d'étage en haut, puis un couloir réservé aux flèches : une
+  // flèche qui traverse les barres se lit comme une barre.
+  texteSvg(reseauSvg, 20, 22, "MOT COURANT", "etage");
+  texteSvg(reseauSvg, 210, 22, "EMBEDDING h", "etage");
+  texteSvg(reseauSvg, 420, 22, "LOGITS", "etage");
+  texteSvg(reseauSvg, 660, 22, "PROBABILITÉS", "etage");
+
+  // Étage 1 : le jeton d'entrée.
+  const jeton = el("g", { class: `s${pas.motEntree + 1}` }, reseauSvg);
+  el("rect", { x: 20, y: 200, width: 110, height: 44, rx: 10, class: "jeton" }, jeton);
+  texteSvg(jeton, 75, 227, VOCAB[pas.motEntree], "jeton-texte", "middle");
+
+  fleche(reseauSvg, 136, 58, 200, 58, "table E");
+
+  // Étage 2 : les D composantes de h, barres signées autour de zéro.
+  const hX = 268;
+  const hDemi = 54;
+  const hHaut = 140;
+  const hPas = 44;
+  let maxH = 0;
+  for (const v of pas.h) maxH = Math.max(maxH, Math.abs(v));
+  maxH = maxH || 1;
+  el("line", { x1: hX, y1: hHaut - 16, x2: hX, y2: hHaut + (DIM - 1) * hPas + 16, class: "axis-line" }, reseauSvg);
+  for (let d = 0; d < DIM; d++) {
+    const y = hHaut + d * hPas;
+    const w = (Math.abs(pas.h[d]) / maxH) * hDemi;
+    el("rect", { x: pas.h[d] >= 0 ? hX : hX - w, y: y - 9, width: w, height: 18, rx: 4,
+                 class: `barre s${pas.motEntree + 1}` }, reseauSvg);
+    texteSvg(reseauSvg, hX - hDemi - 12, y + 4, "d" + d, "cellule-nom", "end");
+    texteSvg(reseauSvg, hX + hDemi + 12, y + 4, nombre(pas.h[d], 2), "valeur-pale");
+  }
+
+  fleche(reseauSvg, 350, 58, 420, 58, "h · W[:,j] + b");
+
+  // Étage 3 : un logit par mot candidat, barres signées.
+  const lX = 520;
+  const lDemi = 56;
+  const lHaut = 90;
+  const lPas = 44;
+  let maxL = 0;
+  for (const v of pas.logits) maxL = Math.max(maxL, Math.abs(v));
+  maxL = maxL || 1;
+  el("line", { x1: lX, y1: lHaut - 16, x2: lX, y2: lHaut + (VOCAB.length - 1) * lPas + 16, class: "axis-line" }, reseauSvg);
+  for (let m = 0; m < VOCAB.length; m++) {
+    const y = lHaut + m * lPas;
+    const w = (Math.abs(pas.logits[m]) / maxL) * lDemi;
+    const rect = el("rect", { x: pas.logits[m] >= 0 ? lX : lX - w, y: y - 9, width: w, height: 18, rx: 4,
+                              class: `barre s${m + 1}` }, reseauSvg);
+    rect.addEventListener("pointerenter", (evt) => montrerDetailMot(evt, m, reseauTooltip, reseauSvg));
+    rect.addEventListener("pointerleave", () => { reseauTooltip.hidden = true; });
+  }
+
+  fleche(reseauSvg, 600, 58, 660, 58, "softmax / T = " + nombre(sequence.temperature, 1));
+
+  // Étage 4 : les probabilités, de 0 à 1, avec le mot tiré encadré.
+  const pX = 672;
+  const pLargeur = 150;
+  for (let m = 0; m < VOCAB.length; m++) {
+    const y = lHaut + m * lPas;
+    const w = pas.probabilites[m] * pLargeur;
+    const rect = el("rect", { x: pX, y: y - 9, width: Math.max(0, w), height: 18, rx: 4,
+                              class: `barre s${m + 1}` }, reseauSvg);
+    rect.addEventListener("pointerenter", (evt) => montrerDetailMot(evt, m, reseauTooltip, reseauSvg));
+    rect.addEventListener("pointerleave", () => { reseauTooltip.hidden = true; });
+    texteSvg(reseauSvg, pX - 8, y + 4, VOCAB[m], "cellule-nom", "end");
+    texteSvg(reseauSvg, pX + Math.max(0, w) + 7, y + 4, nombre(pas.probabilites[m], 2),
+      m === pas.motChoisi ? "valeur" : "valeur-pale");
+    if (m === pas.motChoisi) {
+      el("rect", { x: pX - 4, y: y - 14, width: pLargeur + 60, height: 28, rx: 6, class: "cadre-choisi" }, reseauSvg);
+    }
+  }
+  texteSvg(reseauSvg, pX + pLargeur + 58, lHaut + (VOCAB.length - 1) * lPas + 40,
+    `tirage → « ${VOCAB[pas.motChoisi]} »`, "fleche-nom", "end");
+}
+
+/** Une flèche labellisée : une flèche nue ne dit que « relié d'une façon ou d'une autre ». */
+function fleche(svg, x1, y, x2, y2, libelle) {
+  const ligne = el("line", { x1, y1: y, x2, y2, class: "fleche" }, svg);
+  ligne.setAttribute("marker-end", "url(#fleche-tete)");
+  texteSvg(svg, (x1 + x2) / 2, y - 10, libelle, "fleche-nom", "middle");
+}
+
+function montrerDetailMot(evt, m, tooltip, svg) {
+  const pas = pasCourant();
+  remplirTooltip(tooltip,
+    { valeur: nombre(pas.probabilites[m], 3), libelle: "de probabilité" },
+    [["mot", VOCAB[m] + (m === pas.motChoisi ? " (tiré)" : "")],
+     ["logit", nombre(pas.logits[m], 3)],
+     ["dont h · W", nombre(pas.produits[m], 3)],
+     ["dont biais", nombre(pas.biais[m], 3)]],
+    m);
+  const boite = svg.getBoundingClientRect();
+  tooltip.hidden = false;
+  tooltip.style.left = (evt.clientX - boite.left) + "px";
+  tooltip.style.top = (evt.clientY - boite.top) + "px";
+}
+
+// --- La décomposition du produit scalaire ------------------------------
+const heatmapSvg = document.getElementById("p3-heatmap");
+const heatmapTooltip = document.getElementById("p3-tooltip-heatmap");
+
+function dessinerHeatmap() {
+  const pas = pasCourant();
+  const gauche = 102;   // large : la gouttière porte « somme h · W » et « + biais = logit »
+  const haut = 30;
+  const largeur = 640;
+  const hauteur = 300;
+  const bas = 46;
+  const cellW = (largeur - gauche - 14) / VOCAB.length;
+  const cellH = (hauteur - haut - bas) / DIM;
+  heatmapSvg.textContent = "";
+
+  let maxAbs = 0;
+  for (let d = 0; d < DIM; d++) {
+    for (let m = 0; m < VOCAB.length; m++) maxAbs = Math.max(maxAbs, Math.abs(pas.contributions[d][m]));
+  }
+  maxAbs = maxAbs || 1;
+
+  for (let m = 0; m < VOCAB.length; m++) {
+    texteSvg(heatmapSvg, gauche + m * cellW + cellW / 2, haut - 10, VOCAB[m], "cellule-nom", "middle");
+  }
+  for (let d = 0; d < DIM; d++) {
+    texteSvg(heatmapSvg, gauche - 8, haut + d * cellH + cellH / 2 + 4, "d" + d, "cellule-nom", "end");
+    for (let m = 0; m < VOCAB.length; m++) {
+      const v = pas.contributions[d][m];
+      const part = Math.min(1, Math.abs(v) / maxAbs);
+      const pole = v >= 0 ? "var(--div-pos)" : "var(--div-neg)";
+      // 2px de surface entre les cellules : c'est le vide qui sépare, pas un trait.
+      const cell = el("rect", {
+        x: gauche + m * cellW + 1, y: haut + d * cellH + 1,
+        width: cellW - 2, height: cellH - 2, rx: 3,
+        fill: `color-mix(in oklab, ${pole} ${(part * 100).toFixed(1)}%, var(--div-mid))`
+      }, heatmapSvg);
+      cell.addEventListener("pointerenter", (evt) => {
+        remplirTooltip(heatmapTooltip,
+          { valeur: nombre(v, 3), libelle: "de contribution" },
+          [["dimension", "d" + d],
+           ["mot candidat", VOCAB[m]],
+           ["h[d]", nombre(pas.h[d], 3)],
+           ["W[d, mot]", nombre(pas.h[d] === 0 ? 0 : v / pas.h[d], 3)],
+           ["logit du mot", nombre(pas.logits[m], 3)]],
+          m);
+        const boite = heatmapSvg.getBoundingClientRect();
+        heatmapTooltip.hidden = false;
+        heatmapTooltip.style.left = (evt.clientX - boite.left) + "px";
+        heatmapTooltip.style.top = (evt.clientY - boite.top) + "px";
+      });
+      cell.addEventListener("pointerleave", () => { heatmapTooltip.hidden = true; });
+    }
+  }
+
+  // La somme d'une colonne, c'est le produit scalaire du mot.
+  for (let m = 0; m < VOCAB.length; m++) {
+    texteSvg(heatmapSvg, gauche + m * cellW + cellW / 2, hauteur - bas + 18,
+      nombre(pas.produits[m], 2), "valeur-pale", "middle");
+    texteSvg(heatmapSvg, gauche + m * cellW + cellW / 2, hauteur - bas + 34,
+      nombre(pas.logits[m], 2), m === pas.motChoisi ? "valeur" : "valeur-pale", "middle");
+  }
+  texteSvg(heatmapSvg, gauche - 8, hauteur - bas + 18, "somme h · W", "cellule-nom", "end");
+  texteSvg(heatmapSvg, gauche - 8, hauteur - bas + 34, "+ biais = logit", "cellule-nom", "end");
+
+  document.getElementById("p3-echelle-min").textContent = nombre(-maxAbs, 2);
+  document.getElementById("p3-echelle-max").textContent = nombre(maxAbs, 2);
+  document.getElementById("p3-bande").style.background =
+    "linear-gradient(to right, var(--div-neg), var(--div-mid), var(--div-pos))";
+}
+
+function majTable3() {
+  const pas = pasCourant();
+  const tete = document.getElementById("p3-table-head");
+  const corps = document.getElementById("p3-table-body");
+  tete.textContent = "";
+  corps.textContent = "";
+
+  const colonnes = ["mot candidat"].concat([...Array(DIM).keys()].map((d) => "h[" + d + "]·W[" + d + "]"))
+    .concat(["somme", "biais", "logit", "probabilité"]);
+  const ligneTete = document.createElement("tr");
+  for (const col of colonnes) {
+    const th = document.createElement("th");
+    th.scope = "col";
+    th.textContent = col;
+    ligneTete.appendChild(th);
+  }
+  tete.appendChild(ligneTete);
+
+  for (let m = 0; m < VOCAB.length; m++) {
+    const tr = document.createElement("tr");
+    if (m === pas.motChoisi) tr.dataset.choisi = "true";
+    const th = document.createElement("th");
+    th.scope = "row";
+    const pastille = document.createElement("span");
+    pastille.className = "cle-table";
+    pastille.style.background = `var(--series-${m + 1})`;
+    th.appendChild(pastille);
+    th.appendChild(document.createTextNode(VOCAB[m] + (m === pas.motChoisi ? " (tiré)" : "")));
+    tr.appendChild(th);
+    const valeurs = [];
+    for (let d = 0; d < DIM; d++) valeurs.push(nombre(pas.contributions[d][m], 3));
+    valeurs.push(nombre(pas.produits[m], 3), nombre(pas.biais[m], 3),
+                 nombre(pas.logits[m], 3), nombre(pas.probabilites[m], 4));
+    for (const valeur of valeurs) {
+      const td = document.createElement("td");
+      td.textContent = valeur;
+      tr.appendChild(td);
+    }
+    corps.appendChild(tr);
+  }
+}
+
+function rendrePhase3() {
+  const sequence = sequenceCourante();
+  const pas = pasCourant();
+  const curseur = document.getElementById("p3-curseur");
+  curseur.max = String(sequence.pas.length - 1);
+  document.getElementById("p3-curseur-val").textContent = String(etat3.pas + 1);
+
+  construireJetons();
+  dessinerReseau();
+  dessinerHeatmap();
+  majTable3();
+
+  const determ = sequence.temperature === 0;
+  document.getElementById("p3-contexte-sequence").textContent =
+    `Amorce « ${sequence.amorce} », température ${nombre(sequence.temperature, 1)}`
+    + (determ
+      ? " : le tirage prend toujours le mot le plus probable, cette séquence est donc reproductible à l'identique."
+      : " : le tirage est aléatoire, la même amorce peut donner une autre suite d'un essai à l'autre.");
+
+  document.getElementById("p3-legende").textContent =
+    `Pas ${etat3.pas + 1} sur ${sequence.pas.length} : le mot « ${VOCAB[pas.motEntree]} » entre dans le réseau `
+    + `et en ressort « ${VOCAB[pas.motChoisi]} », qui sera l'entrée du pas suivant. `
+    + `Les barres des deux étages du milieu sont signées : elles partent de l'axe vertical, à gauche si la valeur est négative.`;
+  document.getElementById("p3-caption").textContent =
+    `Les quatre étages traversés à ce pas. Le même W sert à tous les mots : seul h change d'un pas à l'autre, `
+    + `et c'est ce qui fait varier les logits.`;
+  document.getElementById("p3-legende-heatmap").textContent =
+    `Le logit d'un mot est la somme de ${DIM} produits, un par dimension de l'embedding. Cette grille les montre tous : `
+    + `une case bleue pousse le mot vers le haut, une case rouge l'enfonce. C'est la réponse à « pourquoi ce mot-là ? ».`;
+
+  reseauTooltip.hidden = true;
+  heatmapTooltip.hidden = true;
+}
+
+selecteur.addEventListener("change", (evt) => {
+  etat3.sequence = Number(evt.target.value);
+  etat3.pas = 0;
+  document.getElementById("p3-curseur").value = "0";
+  rendrePhase3();
+});
+document.getElementById("p3-curseur").addEventListener("input", (evt) => {
+  etat3.pas = Number(evt.target.value);
+  rendrePhase3();
+});
+brancherTable("p3");
+
+// =====================================================================
+// Onglets, thème, démarrage
+// =====================================================================
+const onglets = [...document.querySelectorAll(".onglets button")];
+onglets.forEach((onglet) => {
+  onglet.addEventListener("click", () => {
+    for (const autre of onglets) {
+      const actif = autre === onglet;
+      autre.setAttribute("aria-selected", String(actif));
+      document.getElementById(autre.getAttribute("aria-controls")).hidden = !actif;
+    }
+  });
+});
+
+for (const bouton of document.querySelectorAll("button.theme")) {
+  bouton.addEventListener("click", () => {
+    const racine = document.documentElement;
+    const sombre = racine.dataset.theme
+      ? racine.dataset.theme === "dark"
+      : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    racine.dataset.theme = sombre ? "light" : "dark";
+  });
+}
+
+document.getElementById("sous-titre").textContent =
+  `${VOCAB.length} mots, des vecteurs en dimension ${DIM}. `
+  + `${P1.positions.length} instantanés pendant le pré-entraînement, ${P2.positions.length} pendant le renforcement, `
+  + `${P3.sequences.length} générations détaillées pas à pas.`;
+
+document.getElementById("avertissement").textContent =
+  `Passer de ${DIM} dimensions à 2 perd de l'information, et chaque phase choisit son repère en conséquence. La phase 1 `
+  + `compare des positions : ACP centrée sur les embeddings, avec la part de variance retenue annoncée sur les axes. `
+  + `La phase 2 mesure un alignement, ce qu'une ACP rend faux — elle peut faire paraître alignés deux vecteurs `
+  + `orthogonaux ; son repère est donc dirigé par h, et son axe horizontal porte h · W / ‖h‖ exactement. `
+  + `Les distances, normes et cosinus chiffrés sont toujours calculés dans l'espace complet.`;
+
+construireCourbe();
+construireCosinus();
+nuage2.rendre();
+rendrePhase3();
+</script>
+</body>
+</html>
